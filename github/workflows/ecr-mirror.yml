@@ -1,1 +1,84 @@
+name: Mirror ECR Images (US → China)
 
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"   # every 30 minutes (adjust as needed)
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      IMAGE_NAME: my-app
+
+    steps:
+      # 1. Install skopeo + jq
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo jq
+
+      # -------------------------
+      # 2. Configure AWS (US)
+      # -------------------------
+      - name: Configure AWS credentials (US)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: arn:aws:iam::480783413181:role/github-ecr-access
+          aws-region: us-east-1
+
+      - name: Login to US ECR
+        run: |
+          aws ecr get-login-password --region us-east-1 \
+          | skopeo login --username AWS --password-stdin 480783413181.dkr.ecr.us-east-1.amazonaws.com
+
+      # -------------------------
+      # 3. Get image tags from US
+      # -------------------------
+      - name: Fetch image tags
+        id: tags
+        run: |
+          TAGS=$(aws ecr list-images \
+            --repository-name $IMAGE_NAME \
+            --region us-east-1 \
+            --query 'imageIds[*].imageTag' \
+            --output json | jq -r '.[]')
+
+          echo "tags<<EOF" >> $GITHUB_OUTPUT
+          echo "$TAGS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      # -------------------------
+      # 4. Configure AWS (China)
+      # -------------------------
+      - name: Configure AWS credentials (China)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: arn:aws-cn:iam::480783413181:role/github-ecr-access
+          aws-region: ap-south-1
+
+      - name: Login to China ECR
+        run: |
+          aws ecr get-login-password --region ap-south-1 \
+          | skopeo login --username AWS --password-stdin 480783413181.dkr.ecr.ap-south-1.amazonaws.com.cn
+
+      # -------------------------
+      # 5. Mirror images
+      # -------------------------
+      - name: Mirror images to China
+        run: |
+          for tag in ${{ steps.tags.outputs.tags }}
+          do
+            echo "Mirroring tag: $tag"
+
+            skopeo copy \
+              docker://480783413181.dkr.ecr.us-east-1.amazonaws.com/$IMAGE_NAME:$tag \
+              docker://480783413181.dkr.ecr.ap-south-1.amazonaws.com.cn/$IMAGE_NAME:$tag \
+              --all || echo "Skipping failed tag: $tag"
+
+          done
